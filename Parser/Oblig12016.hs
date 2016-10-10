@@ -1,3 +1,4 @@
+module Oblig12016 where
 import Data.Char
 import Data.List
 import Data.Maybe
@@ -52,7 +53,8 @@ getWordFromString t@(x:xs)
 
 data Ast =  Number Integer | Name String | App Ast [Ast] | Block [Ast] | 
             Case Ast [Ast] | Bool Ast Ast Ast | Default | Set String Ast |
-            Lambda String Ast       deriving (Eq, Show, Ord)
+            Lambda String Ast | Function String Ast Context
+            deriving (Eq, Show, Ord)
 
 
 ------------------------------------------------------
@@ -60,6 +62,9 @@ data Ast =  Number Integer | Name String | App Ast [Ast] | Block [Ast] |
 
 type Memory = (Integer, Integer -> Maybe Ast)
 newtype Context = Context (String -> Maybe Integer)
+instance Show Context where show _ = "Context"
+instance Eq   Context where (==) _ _ = True
+instance Ord  Context where (<=) _ _ = True
 
 emptyMem = (0, const Nothing)
 emptyCont = Context (const Nothing)
@@ -114,9 +119,12 @@ parseExpr :: Tokens -> (Ast, Tokens)
 parseExpr exp@("(":xs) = parseApp exp
 parseExpr exp@("case":xs) = parseCase exp
 parseExpr set@("set":xs) = parseSet set
+parseExpr lam@("lambda":xs) = parseLambda lam
 parseExpr (x:xs) 
     | isDigit (head x) = (Number (read x), xs)
-    | isLetter (head x) = (Name x, xs)
+    | isLetter (head x) = 
+        if xs == [] || head xs == ")" then (Name x, xs)
+        else parseApp (x:xs)
     | otherwise = error (x ++ " is not a valid beginning of expression. Rest: " ++ (concat xs))
 
 parseApp :: Tokens -> (Ast, Tokens)
@@ -126,12 +134,18 @@ parseApp ("(":xs) =
     in  if komma /= "," then error ("Expected ',' instead of: " ++ komma)
         else if closing /= ")" then error ("Expected ')' instead of: " ++ closing)
         else (App (Name f) [exp1, exp2], zs)
+parseApp (x:xs) =
+    let (exp, rest) = parseExpr xs
+    in  (App (Name x) [exp], rest)
 
 parseCase :: Tokens -> (Ast, Tokens)
+parseCase ("case":"otherwise":"->":[]) = error ("Expected expression after '->'")
 parseCase ("case":"otherwise":"->":xs) =
-    let (exp, (".":expLeft)) = parseExpr xs
-    in  (exp, expLeft)
+    let (exp, (dot:expLeft)) = parseExpr xs
+    in  if dot /= "." then error ("Expected '.' after case, was " ++ dot)
+        else (Case Default [exp], expLeft)
 parseCase ("case":"otherwise":_) = error ("Exptected '->' after otherwise")
+parseCase ("case":[]) = error ("Expected expression after 'case'")
 parseCase ("case":xs) =
     let (a, (arrow:aLeft)) = parseBool xs
         (b, (komma:bLeft)) = parseExpr aLeft
@@ -155,8 +169,17 @@ parseSet ("set":var@(y:ys):xs)
     | not(isLetter y) = error "Missing variable name after 'set'"
     | otherwise =
         let (exp, rest) = parseExpr xs
-        in ((Set var exp), rest)
+        in  ((Set var exp), rest)
 
+parseLambda :: Tokens -> (Ast, Tokens)
+--TODO: Check if variable is valid
+parseLambda ("lambda":var:lP:xs) =
+    let (e, (rP:rest)) = parseExpr xs
+    in  if lP /= "(" || rP /= ")"
+        then error "Expected paranthesis around expression"
+        else if rest == [] then (Lambda var e, rest)
+        else    let (e2, rest2) = parseExpr rest
+                in  (App (Lambda var e) [e2], rest)
 
 --------------------------------------------------------
 -- Eval --
@@ -176,7 +199,13 @@ evalApp (App (Name op) [exp1, exp2]) c m =
     let (Number e1, c1, m1) = evalExp exp1 c m
         (Number e2, c2, m2) = evalExp exp2 c1 m1
     in  ((Number (evalArithmetic op e1 e2)), c2, m2)
-evalApp a b c = (error ("Not valid App: " ++ (show a)))
+evalApp (App (Lambda var lamExp) [exp]) c m =
+    let (c2, m2) = addVarToMem var exp c m
+        (result, _, _) = evalExp lamExp c2 m2 -- TODO: Set inside lambda?
+    in  (result, c, m)
+evalApp (App (Name n) [exp]) c m = 
+    evalApp (App (lookupVar n c m) [exp]) c m
+evalApp a _ _ = (error ("Not valid App: " ++ (show a)))
 
 evalArithmetic :: String -> Integer -> Integer -> Integer
 evalArithmetic "+" a b = a+b;
@@ -190,12 +219,14 @@ evalExp (Case b expr) c m = evalCase (Case b expr) c m
 evalExp (App n expr) c m = evalApp (App n expr) c m
 evalExp (Name v) c m = ((lookupVar v c m), c, m)
 evalExp set@(Set n a) c m = evalSet set c m
+evalExp lam@(Lambda v e) c m = evalLambda lam c m
 
 evalCase :: Ast -> Context -> Memory -> (Ast, Context, Memory)
 evalCase (Case bool [e1, e2]) c m 
     | b = evalExp e1 c1 m1
     | otherwise = evalExp e2 c1 m1
     where (b, c1, m1) = evalBool bool c m 
+evalCase (Case Default [e]) c m = evalExp e c m 
 
 evalBool :: Ast -> Context -> Memory -> (Bool, Context, Memory)
 evalBool (Bool (Name op) a b) c m 
@@ -215,7 +246,10 @@ evalSet (Set s a) c m =
         (c3, m3) = addVarToMem s exp c m
     in  (exp, c3, m3)
 
-
+evalLambda :: Ast -> Context -> Memory -> (Ast, Context, Memory)
+evalLambda (Lambda var lamExp) c m =
+    let (a2, c2, m2) = evalSet (Set var lamExp) c m
+    in  ((Function var lamExp c2), c, m)
 
 
 
