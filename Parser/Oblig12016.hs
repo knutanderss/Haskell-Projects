@@ -144,11 +144,6 @@ parseSet ("set":var@(y:ys):xs)
     | not(isLetter y) = error "Missing variable name after 'set'"
     | otherwise = let (exp, rest) = parseExpr xs in  (Set var exp, rest)
 
--- lambda var lP xs   | rest  | head rest | tail rest |
--- lambda  x  (  x)   | )     |    )      |           |
-
--- lambda var lP    xs      |   rest  | head rest | tail rest |
--- lambda  x   (    x) (1)  |   )(1)  |     )     |   (1)     |
 parseLambda :: Tokens -> (Ast, Tokens)
 parseLambda ("lambda":var:lP:xs) =
     let (e, rest) = parseExpr xs
