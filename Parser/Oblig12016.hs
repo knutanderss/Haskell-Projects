@@ -3,51 +3,33 @@ import Data.Char
 import Data.List
 import Data.Maybe
 
+-- Shell --
+main = prelude emptyCont emptyMem
+prelude c m = do
+  putStr "> "; l <- getLine; let (r, c', m') = eval (parse l) c m;
+  putStrLn $ show r
+  do prelude c' m'
+
 run :: String -> Ast
-run s = eval (parse s) emptyCont emptyMem
+run s = let (r, _, _) = eval (parse s) emptyCont emptyMem in r
 
+-- Tokenizer --
 type Tokens = [String]
-
-skipChars = " "
 doubleChars = ["==", "!=", "->"]
-keywords = ["case", "otherwise"]
 tokenize :: String -> [String]
 tokenize [] = [];
 tokenize tokens@(x:xs)
     | x == ' ' = tokenize xs -- skip char
-    | length (x:xs) >= 2 && take 2 tokens `elem` doubleChars -- token with 2 chars
-        = take 2 tokens : tokenize (drop 2 tokens)
+    | length (x:xs) >= 2 && take 2 tokens `elem` doubleChars = take 2 tokens : tokenize (drop 2 tokens)
     | x `elem` "()=!<>*-+/;,." = [x]:tokenize xs -- token with 1 char
-    | isLetter x = -- token is beginning of a word
-        let (word, rest) = getWordFromString tokens
-        in  (word:tokenize rest)
-    | isJust (getKeywordFromString tokens keywords) = -- token is a keyword
-        let Just(s, sLeft) = getKeywordFromString tokens keywords
-        in s:tokenize sLeft
-    | isDigit x = digit:tokenize rest -- token is a digit
+    | isAlpha x = let (w, rest) = span isAlpha tokens in w:tokenize rest
+    | isPrefixOf "case" tokens = "case":tokenize (drop 4 tokens)
+    | isPrefixOf "otherwise" tokens = "otherwise":tokenize (drop 9 tokens)
+    | isDigit x = let (i,rest) = span isDigit tokens in i:tokenize rest -- token is a digit
     | otherwise = error ("Not a valid token: " ++ [x]) -- token is invalid
-        where   digit = takeWhile isDigit tokens
-                rest = dropWhile isDigit tokens
 
-getKeywordFromString :: String -> [String] -> Maybe (String, String)
-getKeywordFromString tokens [] = Nothing
-getKeywordFromString tokens (word:xs)
-    | word `isPrefixOf` tokens = Just(word, drop (length word) tokens)
-    | otherwise = getKeywordFromString tokens xs
-
-getWordFromString :: String -> (String, String)
-getWordFromString [] = ([], [])
-getWordFromString t@(x:xs)
-    | isLetter x =
-        let (word, rest) = getWordFromString xs
-        in  (x:word, rest)
-    | otherwise = ([], t)
-
--- Grammar --
-data Ast =  Number Integer | Name String | App Ast [Ast] | Block [Ast] |
-            Case Ast [Ast] | Bool Ast Ast Ast | Default | Set String Ast |
-            Lambda String Ast | Function String Ast Context
-            deriving (Eq, Show, Ord)
+data Ast =  Number Integer | Name String | App Ast [Ast] | Block [Ast] | Case Ast [Ast] | Bool Ast Ast Ast
+            | Default | Set String Ast | Lambda String Ast | Function String Ast Context deriving (Eq, Show, Ord)
 
 -- Memory --
 type Memory = (Integer, Integer -> Maybe Ast)
@@ -112,10 +94,7 @@ parseExpr set@("set":xs) = parseSet set
 parseExpr lam@("lambda":xs) = parseLambda lam
 parseExpr (x:xs)
     | isDigit (head x) = (Number (read x), xs)
-    | isLetter (head x) =
-        if   not(null xs) && head xs == "("
-        then parseApp (x:xs)
-        else (Name x, xs)
+    | isLetter (head x) = if not(null xs) && head xs == "(" then parseApp (x:xs) else (Name x, xs)
     | otherwise = error (x ++ " is not a valid beginning of expression. Rest: " ++ concat xs)
 parseExpr [] = error "Tried to parse an empty expression"
 
@@ -137,9 +116,9 @@ parseApp (x:lP:xs) =
 parseCase :: Tokens -> (Ast, Tokens)
 parseCase ["case","otherwise","->"] = error "Expected expression after '->'"
 parseCase ("case":"otherwise":"->":xs) =
-    let (exp, dot:expLeft) = parseExpr xs
-    in  if dot /= "." then error ("Expected '.' after case, was " ++ dot)
-        else (Case Default [exp], expLeft)
+    let (exp, expLeft) = parseExpr xs
+    in  if null expLeft || head expLeft /= "." then error ("Expected '.' after case")
+        else (Case Default [exp], tail expLeft)
 parseCase ("case":"otherwise":_) = error "Exptected '->' after otherwise"
 parseCase ["case"] = error "Expected expression after 'case'"
 parseCase ("case":xs) =
@@ -163,94 +142,67 @@ parseSet :: Tokens -> (Ast, Tokens)
 parseSet ["set"] = error "Missing variable name after 'set'"
 parseSet ("set":var@(y:ys):xs)
     | not(isLetter y) = error "Missing variable name after 'set'"
-    | otherwise =
-        let (exp, rest) = parseExpr xs
-        in  (Set var exp, rest)
+    | otherwise = let (exp, rest) = parseExpr xs in  (Set var exp, rest)
 
+-- lambda var lP xs   | rest  | head rest | tail rest |
+-- lambda  x  (  x)   | )     |    )      |           |
+
+-- lambda var lP    xs      |   rest  | head rest | tail rest |
+-- lambda  x   (    x) (1)  |   )(1)  |     )     |   (1)     |
 parseLambda :: Tokens -> (Ast, Tokens)
 parseLambda ("lambda":var:lP:xs) =
-    let (e, rP:rest) = parseExpr xs
-    in  if lP /= "(" || rP /= ")"
+    let (e, rest) = parseExpr xs
+    in  if lP /= "(" || null rest || head rest /= ")"
         then error "Expected paranthesis around expression"
-        else if null rest || head rest /= "(" then (Lambda var e, rest) -- Check if lambda has expression
-        else    let (lP2:rest') = rest
-                    (e2, rP2:rest2) = parseExpr rest'
-                in  if lP2 /= "(" || rP2 /= ")"
-                    then error ("Expected parenthesis around expression, was " ++ lP2 ++ " and " ++ rP2)
-                    else (App (Lambda var e) [e2], rest2)
+        else if null (tail rest) || head (tail rest) /= "(" then (Lambda var e, tail rest) -- Check if lambda has expression
+        else    let (lP2:rest') = tail rest; (e2, rest2) = parseExpr rest'
+                in  if null rest2 || head rest2 /= ")" then error "Expected parenthesis around expression"
+                    else (App (Lambda var e) [e2], tail rest2)
+parseLambda ["lambda", var] = error "Exptected '(' after variable"
+parseLambda ["lambda"] = error "Expected variable after 'lambda'"
 
 --------------------------------------------------------
 -- Eval --
 
-eval :: Ast -> Context -> Memory -> Ast
-eval ast c m = let (a, c1, c2) = evalBlock ast c m in a
-
-evalBlock :: Ast -> Context -> Memory -> (Ast, Context, Memory)
-evalBlock (Block []) _ _ = error "No expression found."
-evalBlock (Block [a]) c m = evalExp a c m
-evalBlock (Block (a:as)) c m =
-    let (_, c2, m2) = evalExp a c m
-    in  evalBlock (Block as) c2 m2
-
-evalApp :: Ast -> Context -> Memory -> (Ast, Context, Memory)
-evalApp (App (Name op) [exp1, exp2]) c m = -- Arithmetic operation
-    let (Number e1, c1, m1) = evalExp exp1 c m
-        (Number e2, c2, m2) = evalExp exp2 c1 m1
+eval :: Ast -> Context -> Memory -> (Ast, Context, Memory)
+eval (Block []) _ _ = error "No expression found."
+eval (Block [a]) c m = eval a c m
+eval (Block (a:as)) c m =
+    let (_, c2, m2) = eval a c m
+    in  eval (Block as) c2 m2
+eval (App (Name op) [exp1, exp2]) c m = -- Arithmetic operation
+    let (Number e1, c1, m1) = eval exp1 c m
+        (Number e2, c2, m2) = eval exp2 c1 m1
     in  (Number (evalArithmetic op e1 e2), c2, m2)
-evalApp (App (Lambda var lamExp) [exp]) c m = -- Eager lambda expression
-    evalApp (App (Function var lamExp c) [exp]) c m
-evalApp (App (Name n) [exp]) c m = -- <Var> [exp]
-    evalApp (App (lookupVar n c m) [exp]) c m
-evalApp (App (Function var lamExp lamC) [Name x]) c m = -- Evaluating lambda, call by ref
-    let index = lookupCtx c x
-    in  if isJust index then
-            let c' = addToCtx lamC var (fromJust index)
-                (r, c2, m2) = evalExp lamExp c' m
+eval (App (Lambda var lamExp) [exp]) c m = eval (App (Function var lamExp c) [exp]) c m
+eval (App (Name n) [exp]) c m = eval (App (lookupVar n c m) [exp]) c m
+eval (App (Function var lamExp lamC) [Name x]) c m = -- Evaluating lambda, call by ref
+    let index = lookupCtx c x in  if isJust index then
+            let c' = addToCtx lamC var (fromJust index); (r, c2, m2) = eval lamExp c' m
             in  (r, c, m2)
         else error ("Variable is not initialized yet: " ++ x)
-evalApp (App (Function var lamExp lamC) [exp]) c m = -- Evaluating lambda, call by val
-    let (exp', c2, m2) = evalExp exp c m
+eval (App (Function var lamExp lamC) [exp]) c m = -- Evaluating lambda, call by val
+    let (exp', c2, m2) = eval exp c m
         (c3, m3) = addVarToMem var exp' lamC m2
-        (exp'', _, m4) = evalExp lamExp c3 m3
+        (exp'', _, m4) = eval lamExp c3 m3
     in  (exp'', c2, m4)
-evalApp a _ _ = error ("Not valid App: " ++ show a)
-
-op = [("+",(+)),("-",(-)),("*",(*)),("/",div)]
-evalArithmetic :: String -> Integer -> Integer -> Integer
-evalArithmetic o
-    | isJust operator = fromJust operator
-    | otherwise = error ( "Illegal operator: " ++ o )
-    where operator = lookup o op
-
-evalExp :: Ast -> Context -> Memory -> (Ast, Context, Memory)
-evalExp (Number i) c m = (Number i, c, m)
-evalExp (Case b expr) c m = evalCase (Case b expr) c m
-evalExp (App n expr) c m = evalApp (App n expr) c m
-evalExp (Name v) c m = (lookupVar v c m, c, m)
-evalExp set@(Set n a) c m = evalSet set c m
-evalExp lam@(Lambda v e) c m = (Function v e c, c, m)
-
-evalCase :: Ast -> Context -> Memory -> (Ast, Context, Memory)
-evalCase (Case bool [e1, e2]) c m | b = evalExp e1 c1 m1 | otherwise = evalExp e2 c1 m1
+eval (Number i) c m = (Number i, c, m)
+eval (Name v) c m = (lookupVar v c m, c, m)
+eval (Lambda v e) c m = (Function v e c, c, m)
+eval (Case bool [e1, e2]) c m | b = eval e1 c1 m1 | otherwise = eval e2 c1 m1
     where (b, c1, m1) = evalBool bool c m
-evalCase (Case Default [e]) c m = evalExp e c m
+eval (Case Default [e]) c m = eval e c m
+eval (Set s a) c m =let (exp, c2, m2) = eval a c m; mI = lookupCtx c2 s
+                    in  if isJust mI then let m3 = updateMem s exp c2 m2 in (exp, c2, m3)
+                    else  let (c3, m3) = addVarToMem s exp c2 m2 in  (exp, c3, m3)
+eval a _ _ = error ("Not valid App: " ++ show a)
 
-boolOps = [("==",(==)),("!=",(/=)),("<",(<)),(">",(>))]
+evalArithmetic :: String -> Integer -> Integer -> Integer
+evalArithmetic o = fromJust $ lookup o [("+",(+)),("-",(-)),("*",(*)),("/",div)]
+
 evalBool :: Ast -> Context -> Memory -> (Bool, Context, Memory)
 evalBool (Bool (Name op) a b) c m =
-    let operator = lookup op boolOps
-    in  if isJust operator then (fromJust operator n1 n2, c2, m2)
-        else error ("Illegal operator: " ++ op)
-    where   (e1, c1, m1) = evalExp a c m
-            (e2, c2, m2) = evalExp b c1 m1
-            (Number n1) = e1
-            (Number n2) = e2
-
-evalSet :: Ast -> Context -> Memory -> (Ast, Context, Memory)
-evalSet (Set s a) c m = let (exp, c2, m2) = evalExp a c m
-                            mI = lookupCtx c2 s
-                        in  if isJust mI then
-                            let m3 = updateMem s exp c2 m2
-                            in (exp, c2, m3)
-                        else  let (c3, m3) = addVarToMem s exp c2 m2
-                              in  (exp, c3, m3)
+    let operator = lookup op [("==",(==)),("!=",(/=)),("<",(<)),(">",(>))]
+    in  (fromJust operator n1 n2, c2, m2)
+    where   (Number n1, c1, m1) = eval a c m
+            (Number n2, c2, m2) = eval b c1 m1
